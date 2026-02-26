@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Exocad Хранилище 3D-файлов</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f9f9f9;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            background-color: white;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+            vertical-align: middle;
+        }
+        th {
+            background-color: #4CAF50;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+        .downloaded-row {
+            background-color: #d4edda !important;
+        }
+        .filter-form, .upload-form {
+            background: white;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .filter-form label {
+            margin-right: 15px;
+        }
+        .filter-form input, .filter-form select {
+            padding: 5px;
+            margin-right: 10px;
+        }
+        .filter-form button, .upload-form button {
+            padding: 6px 12px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .filter-form button:hover, .upload-form button:hover {
+            background-color: #45a049;
+        }
+        .logout {
+            float: right;
+            color: #fff;
+            background-color: #f44336;
+            padding: 8px 16px;
+            text-decoration: none;
+            border-radius: 4px;
+            margin-left: 10px;
+        }
+        .logout:hover {
+            background-color: #d32f2f;
+        }
+        .add-user-btn {
+            float: right;
+            background-color: #2196F3;
+            color: white;
+            padding: 8px 16px;
+            text-decoration: none;
+            border-radius: 4px;
+        }
+        .add-user-btn:hover {
+            background-color: #1976D2;
+        }
+        .reset-link {
+            margin-left: 10px;
+        }
+        .image-preview {
+            max-width: 50px;
+            max-height: 50px;
+            cursor: pointer;
+        }
+        .delete-btn {
+            background-color: #ff4444;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 5px;
+        }
+        .delete-btn:hover {
+            background-color: #cc0000;
+        }
+        /* Стили для drag-and-drop */
+        .drop-zone {
+            border: 2px dashed #ccc;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            background-color: #fafafa;
+            cursor: pointer;
+            margin-bottom: 10px;
+            transition: background-color 0.2s, border-color 0.2s;
+        }
+        .drop-zone.dragover {
+            background-color: #e1f5fe;
+            border-color: #2196F3;
+        }
+        .drop-zone .file-name {
+            margin-top: 10px;
+            font-weight: bold;
+            color: #333;
+        }
+        .upload-form input[type="text"], .upload-form textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0 10px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .status-checkbox {
+            margin-right: 15px;
+        }
+        .btn {
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <h1>Хранилище 3D-файлов 
+        <span style="font-size: 0.7em;">(вы вошли как <strong><%= currentUser %></strong>)</span>
+        <a href="/logout" class="logout">Выйти</a>
+        <a href="/add-user" class="add-user-btn">➕ Добавить пользователя</a>
+    </h1>
+
+    <!-- Форма загрузки (drag-and-drop) -->
+    <div class="upload-form">
+        <h2>Загрузить новый файл</h2>
+        <div id="uploadForm">
+            <!-- 3D файл -->
+            <div class="drop-zone" id="dropZoneStl">
+                <input type="file" id="stlFileInput" style="display: none;" accept="*/*">
+                <p>Перетащите 3D-файл сюда или кликните для выбора</p>
+                <div class="file-name" id="stlFileName"></div>
+            </div>
+            <!-- Изображение -->
+            <div class="drop-zone" id="dropZoneImage">
+                <input type="file" id="imageFileInput" style="display: none;" accept="*/*">
+                <p>Перетащите изображение сюда или кликните для выбора (необязательно)</p>
+                <div class="file-name" id="imageFileName"></div>
+            </div>
+            <!-- Поля статусов и комментарий -->
+            <div>
+                <label class="status-checkbox">
+                    <input type="checkbox" id="milledCheckbox"> Выпилено
+                </label>
+                <label class="status-checkbox">
+                    <input type="checkbox" id="bakedCheckbox"> Запечено
+                </label>
+            </div>
+            <div>
+                <label>Комментарий:</label>
+                <textarea id="commentText" rows="2"></textarea>
+            </div>
+            <button type="button" id="uploadBtn" class="btn">Загрузить</button>
+            <div id="uploadStatus" style="margin-top: 10px;"></div>
+        </div>
+    </div>
+
+    <!-- Фильтры (без изменений) -->
+    <div class="filter-form">
+        <h2>Фильтры</h2>
+        <form method="get">
+            <label>
+                Дата загрузки:
+                <input type="date" name="date" value="<%= filters.date || '' %>">
+            </label>
+            <label>
+                Загрузил:
+                <select name="uploader">
+                    <option value="">Все</option>
+                    <% users.forEach(user => { %>
+                        <option value="<%= user %>" <%= filters.uploader === user ? 'selected' : '' %>><%= user %></option>
+                    <% }); %>
+                </select>
+            </label>
+            <label>
+                Статус скачивания:
+                <select name="downloaded">
+                    <option value="">Все</option>
+                    <option value="false" <%= filters.downloaded === 'false' ? 'selected' : '' %>>Не скачано</option>
+                    <option value="true" <%= filters.downloaded === 'true' ? 'selected' : '' %>>Скачано</option>
+                </select>
+            </label>
+            <button type="submit">Применить</button>
+            <a href="/" class="reset-link">Сбросить</a>
+        </form>
+    </div>
+
+    <!-- Таблица файлов -->
+    <h2>Список файлов</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Изображение</th>
+                <th>Имя 3D-файла</th>
+                <th>Загрузил</th>
+                <th>Дата загрузки</th>
+                <th>Статус скачивания</th>
+                <th>Скачал</th>
+                <th>Дата скачивания</th>
+                <th>Выпилено</th>
+                <th>Запечено</th>
+                <th>Комментарий</th>
+                <th>Действия</th>
+            </tr>
+        </thead>
+        <tbody>
+            <% if (files.length === 0) { %>
+                <tr><td colspan="11" style="text-align:center;">Нет файлов, соответствующих фильтру</td></tr>
+            <% } %>
+            <% files.forEach(file => { %>
+                <tr class="<%= file.downloaded ? 'downloaded-row' : '' %>">
+                    <td>
+                        <% if (file.image_name) { %>
+                            <a href="/image/<%= file.id %>" target="_blank">
+                                <img src="/image/<%= file.id %>" alt="Image" class="image-preview" 
+                                     onerror="this.style.display='none'">
+                            </a>
+                        <% } else { %>
+                            <span>—</span>
+                        <% } %>
+                    </td>
+                    <td><%= file.original_name %></td>
+                    <td><%= file.uploader %></td>
+                    <td><%= new Date(file.upload_date).toLocaleString() %></td>
+                    <td><%= file.downloaded ? 'Скачан' : 'Не скачан' %></td>
+                    <td><%= file.downloaded_by || '-' %></td>
+                    <td><%= file.downloaded_date ? new Date(file.downloaded_date).toLocaleString() : '-' %></td>
+                    <td>
+                        <span id="milled-<%= file.id %>"><%= file.milled ? '✅' : '○' %></span>
+                        <button onclick="toggleStatus(<%= file.id %>, 'milled')">🔄</button>
+                    </td>
+                    <td>
+                        <span id="baked-<%= file.id %>"><%= file.baked ? '✅' : '○' %></span>
+                        <button onclick="toggleStatus(<%= file.id %>, 'baked')">🔄</button>
+                    </td>
+                    <td>
+                        <span id="comment-<%= file.id %>"><%= file.comment || '' %></span>
+                        <button onclick="editComment(<%= file.id %>)">✏️</button>
+                    </td>
+                    <td>
+                        <a href="/download/<%= file.id %>">Скачать 3D</a>
+                        <% if (file.image_name) { %>
+                            <br><a href="/download-image/<%= file.id %>">Скачать изображение</a>
+                        <% } %>
+                        <br><button class="delete-btn" onclick="deleteFile(<%= file.id %>)">Удалить</button>
+                    </td>
+                </tr>
+            <% }); %>
+        </tbody>
+    </table>
+
+    <script>
+        // Drag-and-drop логика
+        const stlDropZone = document.getElementById('dropZoneStl');
+        const imageDropZone = document.getElementById('dropZoneImage');
+        const stlInput = document.getElementById('stlFileInput');
+        const imageInput = document.getElementById('imageFileInput');
+        const stlFileName = document.getElementById('stlFileName');
+        const imageFileName = document.getElementById('imageFileName');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const milledCheck = document.getElementById('milledCheckbox');
+        const bakedCheck = document.getElementById('bakedCheckbox');
+        const commentText = document.getElementById('commentText');
+        const uploadStatus = document.getElementById('uploadStatus');
+
+        let selectedStlFile = null;
+        let selectedImageFile = null;
+
+        function setupDropZone(zone, input, fileNameDiv, isImage) {
+            // Клик по зоне открывает диалог выбора файла
+            zone.addEventListener('click', () => input.click());
+
+            // Подсветка при перетаскивании
+            zone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                zone.classList.add('dragover');
+            });
+            zone.addEventListener('dragleave', () => {
+                zone.classList.remove('dragover');
+            });
+            zone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                zone.classList.remove('dragover');
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    const file = files[0];
+                    if (isImage) {
+                        selectedImageFile = file;
+                        imageFileName.textContent = file.name;
+                    } else {
+                        selectedStlFile = file;
+                        stlFileName.textContent = file.name;
+                    }
+                }
+            });
+
+            // Выбор файла через input
+            input.addEventListener('change', () => {
+                if (input.files.length > 0) {
+                    const file = input.files[0];
+                    if (isImage) {
+                        selectedImageFile = file;
+                        imageFileName.textContent = file.name;
+                    } else {
+                        selectedStlFile = file;
+                        stlFileName.textContent = file.name;
+                    }
+                }
+            });
+        }
+
+        setupDropZone(stlDropZone, stlInput, stlFileName, false);
+        setupDropZone(imageDropZone, imageInput, imageFileName, true);
+
+        // Отправка формы через AJAX
+        uploadBtn.addEventListener('click', () => {
+            if (!selectedStlFile) {
+                alert('Выберите 3D-файл');
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('stlFile', selectedStlFile);
+            if (selectedImageFile) {
+                formData.append('imageFile', selectedImageFile);
+            }
+            formData.append('milled', milledCheck.checked ? 'on' : 'off');
+            formData.append('baked', bakedCheck.checked ? 'on' : 'off');
+            formData.append('comment', commentText.value);
+
+            uploadStatus.textContent = 'Загрузка...';
+
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => {
+                if (response.redirected) {
+                    window.location.href = response.url;
+                } else {
+                    return response.text().then(text => { throw new Error(text); });
+                }
+            })
+            .catch(err => {
+                uploadStatus.textContent = 'Ошибка: ' + err.message;
+            });
+        });
+
+        // Функции для работы со статусами и комментариями (AJAX)
+        function toggleStatus(id, type) {
+            fetch(`/toggle-${type}/${id}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        const span = document.getElementById(`${type}-${id}`);
+                        span.textContent = span.textContent === '✅' ? '○' : '✅';
+                    }
+                })
+                .catch(err => alert('Ошибка: ' + err));
+        }
+
+        function editComment(id) {
+            const currentSpan = document.getElementById(`comment-${id}`);
+            const currentText = currentSpan.textContent;
+            const newText = prompt('Введите новый комментарий:', currentText);
+            if (newText !== null) {
+                fetch(`/comment/${id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ comment: newText })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        currentSpan.textContent = newText;
+                    }
+                })
+                .catch(err => alert('Ошибка: ' + err));
+            }
+        }
+
+        // Удаление (без изменений)
+        function deleteFile(id) {
+            const code = prompt('Введите код подтверждения (78):');
+            if (code === null) return;
+            
+            fetch(`/delete/${id}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: `code=${encodeURIComponent(code)}`
+            })
+            .then(response => {
+                if (response.redirected) {
+                    window.location.href = response.url;
+                } else {
+                    response.text().then(text => alert('Ошибка: ' + text));
+                }
+            })
+            .catch(err => alert('Ошибка сети: ' + err));
+        }
+    </script>
+</body>
+</html>
