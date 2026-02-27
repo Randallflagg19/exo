@@ -60,25 +60,43 @@
         .filter-form button:hover, .upload-form button:hover {
             background-color: #45a049;
         }
-        .logout {
-            float: right;
-            color: #fff;
-            background-color: #f44336;
-            padding: 8px 16px;
+        .page-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .header-buttons {
+            display: inline-flex;
+            align-items: stretch;
+            gap: 10px;
+            margin-left: auto;
+        }
+        .logout,
+        .add-user-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            height: 38px;
+            padding: 0 16px;
+            box-sizing: border-box;
             text-decoration: none;
             border-radius: 4px;
-            margin-left: 10px;
+            font-size: 14px;
+            line-height: 1;
+            white-space: nowrap;
+        }
+        .logout {
+            color: #fff;
+            background-color: #f44336;
         }
         .logout:hover {
             background-color: #d32f2f;
         }
         .add-user-btn {
-            float: right;
             background-color: #2196F3;
             color: white;
-            padding: 8px 16px;
-            text-decoration: none;
-            border-radius: 4px;
         }
         .add-user-btn:hover {
             background-color: #1976D2;
@@ -133,6 +151,48 @@
         .status-checkbox {
             margin-right: 15px;
         }
+        .comment-cell {
+            max-width: 22em;
+        }
+        .comment-text {
+            display: inline-block;
+            max-width: 20ch;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            vertical-align: middle;
+        }
+        .btn-edit {
+            display: inline-block;
+            margin-left: 8px;
+            padding: 4px 10px;
+            font-size: 12px;
+            line-height: 1.4;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background: #fff;
+            color: #333;
+            cursor: pointer;
+            vertical-align: middle;
+            text-decoration: none;
+            transition: background 0.2s, border-color 0.2s, color 0.2s;
+        }
+        .btn-edit:hover {
+            background: #2196F3;
+            color: white;
+            border-color: #2196F3;
+        }
+        .cell-center {
+            text-align: center;
+            vertical-align: middle;
+        }
+        .status-cb {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: #4CAF50;
+            margin: 0;
+            vertical-align: middle;
+        }
         .btn {
             padding: 8px 16px;
             background-color: #4CAF50;
@@ -147,10 +207,12 @@
     </style>
 </head>
 <body>
-    <h1>Хранилище 3D-файлов 
+    <h1 class="page-header">Хранилище 3D-файлов 
         <span style="font-size: 0.7em;">(вы вошли как <strong><%= currentUser %></strong>)</span>
-        <a href="/logout" class="logout">Выйти</a>
-        <a href="/add-user" class="add-user-btn">➕ Добавить пользователя</a>
+        <span class="header-buttons">
+            <a href="/add-user" class="add-user-btn">➕ Добавить пользователя</a>
+            <a href="/logout" class="logout">Выйти</a>
+        </span>
     </h1>
 
     <!-- Форма загрузки (drag-and-drop) -->
@@ -163,20 +225,11 @@
                 <p>Перетащите 3D-файл сюда или кликните для выбора</p>
                 <div class="file-name" id="stlFileName"></div>
             </div>
-            <!-- Изображение -->
+            <!-- Фото -->
             <div class="drop-zone" id="dropZoneImage">
-                <input type="file" id="imageFileInput" style="display: none;" accept="*/*">
-                <p>Перетащите изображение сюда или кликните для выбора (необязательно)</p>
+                <input type="file" id="imageFileInput" style="display: none;" accept="image/*">
+                <p>Перетащите фото сюда или кликните для выбора (необязательно)</p>
                 <div class="file-name" id="imageFileName"></div>
-            </div>
-            <!-- Поля статусов и комментарий -->
-            <div>
-                <label class="status-checkbox">
-                    <input type="checkbox" id="milledCheckbox"> Выпилено
-                </label>
-                <label class="status-checkbox">
-                    <input type="checkbox" id="bakedCheckbox"> Запечено
-                </label>
             </div>
             <div>
                 <label>Комментарий:</label>
@@ -257,17 +310,17 @@
                     <td><%= file.downloaded ? 'Скачан' : 'Не скачан' %></td>
                     <td><%= file.downloaded_by || '-' %></td>
                     <td><%= file.downloaded_date ? new Date(file.downloaded_date).toLocaleString() : '-' %></td>
-                    <td>
-                        <span id="milled-<%= file.id %>"><%= file.milled ? '✅' : '○' %></span>
-                        <button onclick="toggleStatus(<%= file.id %>, 'milled')">🔄</button>
+                    <td class="cell-center">
+                        <input type="checkbox" class="status-cb" id="milled-<%= file.id %>" <%= file.milled ? 'checked' : '' %>
+                            onchange="toggleStatus(<%= file.id %>, 'milled', this)" title="Выпилено">
                     </td>
-                    <td>
-                        <span id="baked-<%= file.id %>"><%= file.baked ? '✅' : '○' %></span>
-                        <button onclick="toggleStatus(<%= file.id %>, 'baked')">🔄</button>
+                    <td class="cell-center">
+                        <input type="checkbox" class="status-cb" id="baked-<%= file.id %>" <%= file.baked ? 'checked' : '' %>
+                            onchange="toggleStatus(<%= file.id %>, 'baked', this)" title="Запечено">
                     </td>
-                    <td>
-                        <span id="comment-<%= file.id %>"><%= file.comment || '' %></span>
-                        <button onclick="editComment(<%= file.id %>)">✏️</button>
+                    <td class="comment-cell">
+                        <span id="comment-<%= file.id %>" class="comment-text"><%= file.comment || '' %></span>
+                        <button type="button" class="btn-edit" onclick="editComment(<%= file.id %>)" title="Изменить комментарий">Изменить</button>
                     </td>
                     <td>
                         <a href="/download/<%= file.id %>">Скачать 3D</a>
@@ -290,8 +343,6 @@
         const stlFileName = document.getElementById('stlFileName');
         const imageFileName = document.getElementById('imageFileName');
         const uploadBtn = document.getElementById('uploadBtn');
-        const milledCheck = document.getElementById('milledCheckbox');
-        const bakedCheck = document.getElementById('bakedCheckbox');
         const commentText = document.getElementById('commentText');
         const uploadStatus = document.getElementById('uploadStatus');
 
@@ -356,8 +407,8 @@
             if (selectedImageFile) {
                 formData.append('imageFile', selectedImageFile);
             }
-            formData.append('milled', milledCheck.checked ? 'on' : 'off');
-            formData.append('baked', bakedCheck.checked ? 'on' : 'off');
+            formData.append('milled', 'off');
+            formData.append('baked', 'off');
             formData.append('comment', commentText.value);
 
             uploadStatus.textContent = 'Загрузка...';
@@ -379,16 +430,20 @@
         });
 
         // Функции для работы со статусами и комментариями (AJAX)
-        function toggleStatus(id, type) {
+        function toggleStatus(id, type, checkboxEl) {
+            const wasChecked = checkboxEl.checked;
             fetch(`/toggle-${type}/${id}`, { method: 'POST' })
                 .then(res => res.json())
                 .then(data => {
-                    if (data.success) {
-                        const span = document.getElementById(`${type}-${id}`);
-                        span.textContent = span.textContent === '✅' ? '○' : '✅';
+                    if (!data.success) {
+                        checkboxEl.checked = !wasChecked;
+                        alert('Не удалось обновить статус');
                     }
                 })
-                .catch(err => alert('Ошибка: ' + err));
+                .catch(err => {
+                    checkboxEl.checked = !wasChecked;
+                    alert('Ошибка: ' + err);
+                });
         }
 
         function editComment(id) {
