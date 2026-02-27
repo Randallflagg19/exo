@@ -116,7 +116,11 @@ db.serialize(() => {
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use((req, res, next) => {
-  res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+  // Не ставим text/html для маршрутов, отдающих файлы — иначе картинки открываются как текст
+  const isFileRoute = req.path.startsWith('/image/') || req.path.startsWith('/download');
+  if (!isFileRoute) {
+    res.setHeader('Content-Type', 'text/html; charset=UTF-8');
+  }
   next();
 });
 app.use(session({
@@ -309,6 +313,17 @@ app.get('/download/:id', (req, res) => {
   });
 });
 
+// MIME-типы для изображений (чтобы браузер открывал картинку, а не показывал бинарник)
+const imageMime = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.svg': 'image/svg+xml'
+};
+
 // Просмотр изображения в браузере (inline)
 app.get('/image/:id', (req, res) => {
   const fileId = req.params.id;
@@ -319,7 +334,11 @@ app.get('/image/:id', (req, res) => {
     }
 
     const imagePath = path.join(uploadDir, file.uploader, file.image_name);
-    res.sendFile(imagePath, { headers: { 'Content-Disposition': 'inline' } });
+    const ext = path.extname(file.image_name).toLowerCase();
+    const contentType = imageMime[ext] || 'image/png';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', 'inline');
+    res.sendFile(imagePath);
   });
 });
 
