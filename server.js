@@ -229,10 +229,45 @@ app.get('/', (req, res) => {
       return res.status(500).send('Ошибка базы данных');
     }
 
+    // Группировка по месяцу и дню для сворачивания (новые сверху)
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const monthNames = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+    const monthNamesGen = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+    const byMonth = {};
+    files.forEach(f => {
+      const d = (f.upload_date || '').slice(0, 10);
+      if (!d) return;
+      const [y, m] = d.split('-').map(Number);
+      const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+      if (!byMonth[monthKey]) {
+        byMonth[monthKey] = { monthKey, monthLabel: `${monthNames[m - 1]} ${y}`, days: {} };
+      }
+      if (!byMonth[monthKey].days[d]) {
+        byMonth[monthKey].days[d] = { dateKey: d, isToday: d === today, files: [] };
+      }
+      byMonth[monthKey].days[d].files.push(f);
+    });
+    const groupedFiles = Object.keys(byMonth)
+      .sort((a, b) => b.localeCompare(a))
+      .map(k => {
+        const month = byMonth[k];
+        const dayKeys = Object.keys(month.days).sort((a, b) => b.localeCompare(a));
+        month.daysList = dayKeys.map(dk => {
+          const day = month.days[dk];
+          const [, mm, dd] = dk.split('-');
+          const mi = parseInt(mm, 10) - 1;
+          day.dayLabel = `${parseInt(dd, 10)} ${monthNamesGen[mi]} ${month.monthLabel.split(' ')[1]}`;
+          return day;
+        });
+        return month;
+      });
+
     db.all('SELECT DISTINCT uploader FROM files', (err, rows) => {
       const uploaders = rows.map(row => row.uploader);
       res.render('index', {
         files: files,
+        groupedFiles,
+        todayKey: today,
         users: uploaders,
         currentUser: req.session.user,
         filters: { date, uploader, downloaded }
