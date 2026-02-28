@@ -166,6 +166,7 @@
             margin-top: 10px;
             font-weight: bold;
             color: #333;
+            word-break: break-word;
         }
         .upload-form input[type="text"], .upload-form textarea {
             width: 100%;
@@ -268,6 +269,21 @@
         .btn:hover {
             background-color: #45a049;
         }
+        .upload-status {
+            margin-top: 10px;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        .upload-status.error {
+            background-color: #ffebee;
+            color: #c62828;
+            border: 1px solid #ef9a9a;
+        }
+        .upload-status.success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+            border: 1px solid #a5d6a7;
+        }
     </style>
 </head>
 <body>
@@ -281,30 +297,30 @@
 
     <!-- Форма загрузки (drag-and-drop) -->
     <div class="upload-form">
-        <h2>Загрузить новый файл</h2>
+        <h2>Загрузить файлы</h2>
         <div id="uploadForm">
-            <!-- 3D файл -->
+            <!-- 3D файлы (множественный выбор) -->
             <div class="drop-zone" id="dropZoneStl">
-                <input type="file" id="stlFileInput" style="display: none;" accept="*/*">
-                <p>Перетащите 3D-файл сюда или кликните для выбора</p>
+                <input type="file" id="stlFileInput" style="display: none;" multiple>
+                <p>Перетащите 3D-файлы сюда или кликните для выбора (можно несколько)</p>
                 <div class="file-name" id="stlFileName"></div>
             </div>
-            <!-- Фото -->
+            <!-- Фото (один файл) -->
             <div class="drop-zone" id="dropZoneImage">
                 <input type="file" id="imageFileInput" style="display: none;" accept="image/*">
                 <p>Перетащите фото сюда или кликните для выбора (необязательно)</p>
                 <div class="file-name" id="imageFileName"></div>
             </div>
             <div>
-                <label>Комментарий:</label>
+                <label>Комментарий (общий для всех загружаемых файлов):</label>
                 <textarea id="commentText" rows="2"></textarea>
             </div>
             <button type="button" id="uploadBtn" class="btn">Загрузить</button>
-            <div id="uploadStatus" style="margin-top: 10px;"></div>
+            <div id="uploadStatus" class="upload-status"></div>
         </div>
     </div>
 
-    <!-- Фильтры (без изменений) -->
+    <!-- Фильтры -->
     <div class="filter-form">
         <h2>Фильтры</h2>
         <form method="get">
@@ -484,9 +500,6 @@
         const commentText = document.getElementById('commentText');
         const uploadStatus = document.getElementById('uploadStatus');
 
-        let selectedStlFile = null;
-        let selectedImageFile = null;
-
         function setupDropZone(zone, input, fileNameDiv, isImage) {
             // Клик по зоне открывает диалог выбора файла
             zone.addEventListener('click', () => input.click());
@@ -504,13 +517,19 @@
                 zone.classList.remove('dragover');
                 const files = e.dataTransfer.files;
                 if (files.length > 0) {
-                    const file = files[0];
+                    // Для изображений берём только первый файл
                     if (isImage) {
-                        selectedImageFile = file;
-                        imageFileName.textContent = file.name;
+                        input.files = files; // это сработает, но лучше присвоить files вручную? Оставим так, но нужно учесть, что input.files read-only.
+                        // Но мы не можем напрямую присвоить input.files. Лучше обработать через DataTransfer.
+                        // Просто сохраним в переменную и обновим отображение.
+                        // В целях простоты будем использовать глобальные переменные, как раньше.
+                        // Для изображений мы всё равно используем отдельную переменную, поэтому назначим selectedImageFile.
+                        selectedImageFile = files[0];
+                        imageFileName.textContent = files[0].name;
                     } else {
-                        selectedStlFile = file;
-                        stlFileName.textContent = file.name;
+                        // Для STL можно сохранить все файлы
+                        selectedStlFiles = Array.from(files);
+                        stlFileName.textContent = selectedStlFiles.map(f => f.name).join(', ');
                     }
                 }
             });
@@ -518,38 +537,53 @@
             // Выбор файла через input
             input.addEventListener('change', () => {
                 if (input.files.length > 0) {
-                    const file = input.files[0];
                     if (isImage) {
-                        selectedImageFile = file;
-                        imageFileName.textContent = file.name;
+                        selectedImageFile = input.files[0];
+                        imageFileName.textContent = input.files[0].name;
                     } else {
-                        selectedStlFile = file;
-                        stlFileName.textContent = file.name;
+                        selectedStlFiles = Array.from(input.files);
+                        stlFileName.textContent = selectedStlFiles.map(f => f.name).join(', ');
+                    }
+                } else {
+                    if (isImage) {
+                        selectedImageFile = null;
+                        imageFileName.textContent = '';
+                    } else {
+                        selectedStlFiles = [];
+                        stlFileName.textContent = '';
                     }
                 }
             });
         }
+
+        let selectedStlFiles = [];
+        let selectedImageFile = null;
 
         setupDropZone(stlDropZone, stlInput, stlFileName, false);
         setupDropZone(imageDropZone, imageInput, imageFileName, true);
 
         // Отправка формы через AJAX
         uploadBtn.addEventListener('click', () => {
-            if (!selectedStlFile) {
-                alert('Выберите 3D-файл');
+            if (selectedStlFiles.length === 0) {
+                uploadStatus.textContent = 'Ошибка: выберите хотя бы один 3D-файл.';
+                uploadStatus.className = 'upload-status error';
                 return;
             }
 
             const formData = new FormData();
-            formData.append('stlFile', selectedStlFile);
+            selectedStlFiles.forEach(file => {
+                formData.append('stlFiles', file);
+            });
             if (selectedImageFile) {
                 formData.append('imageFile', selectedImageFile);
             }
+            // Поля milled/baked пока не используются в форме, но можно добавить позже
             formData.append('milled', 'off');
             formData.append('baked', 'off');
             formData.append('comment', commentText.value);
 
             uploadStatus.textContent = 'Загрузка...';
+            uploadStatus.className = 'upload-status';
 
             fetch('/upload', {
                 method: 'POST',
@@ -564,6 +598,7 @@
             })
             .catch(err => {
                 uploadStatus.textContent = 'Ошибка: ' + err.message;
+                uploadStatus.className = 'upload-status error';
             });
         });
 
@@ -604,7 +639,7 @@
             }
         }
 
-        // Удаление (без изменений)
+        // Удаление
         function deleteFile(id) {
             const code = prompt('Введите код подтверждения (78):');
             if (code === null) return;
