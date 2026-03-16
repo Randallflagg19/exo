@@ -5,6 +5,7 @@ const multer = require('multer');
 const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
+const ExcelJS = require('exceljs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,11 +22,8 @@ const ADD_USER_PASSWORD = process.env.ADD_USER_PASSWORD || '545';
 
 // Пути к папкам для данных
 const uploadDir = path.join(appRoot, 'uploads');
-// База данных теперь не локальная, а на PostgreSQL, поэтому папка database не нужна, но оставим для совместимости?
-// Можем не создавать, просто удалим.
-const dbDir = path.join(appRoot, 'database'); // можно удалить, но оставим для обратной совместимости
+const dbDir = path.join(appRoot, 'database');
 
-// Создаём папку uploads, если её нет
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
   console.log('Создана папка для загрузок:', uploadDir);
@@ -38,11 +36,10 @@ const pool = new Pool({
   user: process.env.DB_USER || 'postgres',
   password: process.env.DB_PASSWORD || 'postgres',
   database: process.env.DB_NAME || 'exostart',
-  max: 20, // максимальное количество клиентов в пуле
+  max: 20,
   idleTimeoutMillis: 30000,
 });
 
-// Проверка подключения
 pool.connect((err, client, release) => {
   if (err) {
     console.error('Ошибка подключения к PostgreSQL:', err.stack);
@@ -56,7 +53,6 @@ pool.connect((err, client, release) => {
 // ------ Инициализация таблиц ------
 async function initDb() {
   try {
-    // Таблица files
     await pool.query(`
       CREATE TABLE IF NOT EXISTS files (
         id SERIAL PRIMARY KEY,
@@ -75,7 +71,6 @@ async function initDb() {
     `);
     console.log('Таблица files проверена/создана');
 
-    // Таблица users
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -84,7 +79,6 @@ async function initDb() {
     `);
     console.log('Таблица users проверена/создана');
 
-    // Добавление новых колонок, если их нет (PostgreSQL не имеет прямого "PRAGMA table_info", используем information_schema)
     const checkAndAddColumn = async (table, column, definition) => {
       const res = await pool.query(`
         SELECT column_name 
@@ -102,7 +96,6 @@ async function initDb() {
     await checkAndAddColumn('files', 'baked', 'BOOLEAN DEFAULT FALSE');
     await checkAndAddColumn('files', 'comment', 'TEXT');
 
-    // Заполняем users начальными данными, если таблица пуста
     const userCount = await pool.query('SELECT COUNT(*) FROM users');
     if (parseInt(userCount.rows[0].count) === 0) {
       const defaultUsers = [
@@ -142,7 +135,7 @@ app.use(express.static(path.join(appRoot, 'public')));
 app.set('view engine', 'ejs');
 app.set('views', path.join(appRoot, 'views'));
 
-// ------ Multer для загрузки файлов (с уникальными именами) ------
+// ------ Multer для загрузки файлов ------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const userDir = path.join(uploadDir, req.session.user);
@@ -186,7 +179,6 @@ app.get('/login', async (req, res) => {
   }
 });
 
-// Обработка выбора пользователя
 app.post('/set-user', async (req, res) => {
   const username = req.body.username;
   try {
@@ -202,15 +194,18 @@ app.post('/set-user', async (req, res) => {
   }
 });
 
-// Выход
 app.get('/logout', (req, res) => {
   req.session.destroy();
   res.redirect('/login');
 });
 
-// Главная страница
+// Главная страница (с перенаправлением для Елены и динамическим поиском)
 app.get('/', async (req, res) => {
-  const { date, uploader, downloaded } = req.query;
+  if (req.session.user === 'Елена') {
+    return res.redirect('/titan');
+  }
+
+  const { date, uploader, downloaded, filename } = req.query;
 
   let sql = 'SELECT * FROM files';
   const params = [];
@@ -228,6 +223,10 @@ app.get('/', async (req, res) => {
     conditions.push('downloaded = $' + (params.length + 1));
     params.push(downloaded === 'true');
   }
+  if (filename && filename.trim() !== '') {
+    conditions.push('original_name ILIKE $' + (params.length + 1));
+    params.push('%' + filename + '%');
+  }
 
   if (conditions.length > 0) {
     sql += ' WHERE ' + conditions.join(' AND ');
@@ -239,7 +238,6 @@ app.get('/', async (req, res) => {
     const filesResult = await pool.query(sql, params);
     const files = filesResult.rows;
 
-    // Группировка по месяцу и дню для сворачивания
     const today = new Date().toISOString().slice(0, 10);
     const monthNames = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
     const monthNamesGen = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
@@ -281,7 +279,7 @@ app.get('/', async (req, res) => {
       todayKey: today,
       users: uploaders,
       currentUser: req.session.user,
-      filters: { date, uploader, downloaded }
+      filters: { date, uploader, downloaded, filename }
     });
   } catch (err) {
     console.error(err);
@@ -289,7 +287,7 @@ app.get('/', async (req, res) => {
   }
 });
 
-// Загрузка нескольких файлов (и одного изображения, опционально)
+// Загрузка файлов
 app.post('/upload', upload.fields([
   { name: 'stlFiles', maxCount: 20 },
   { name: 'imageFile', maxCount: 1 }
@@ -332,7 +330,7 @@ app.post('/upload', upload.fields([
   }
 });
 
-// Скачивание 3D-файла (с сохранением списка всех скачавших)
+// Скачивание 3D-файла
 app.get('/download/:id', async (req, res) => {
   const fileId = req.params.id;
   const downloader = req.session.user;
@@ -344,7 +342,6 @@ app.get('/download/:id', async (req, res) => {
     }
     const file = fileResult.rows[0];
 
-    // Функция для обновления списка скачавших
     const updateDownloaders = (currentList, newUser) => {
       if (!currentList) return newUser;
       const users = currentList.split(',').map(u => u.trim());
@@ -353,14 +350,12 @@ app.get('/download/:id', async (req, res) => {
     };
 
     if (!file.downloaded) {
-      // Первое скачивание
       const downloadDate = new Date().toISOString();
       await pool.query(
         'UPDATE files SET downloaded = TRUE, downloaded_by = $1, downloaded_date = $2 WHERE id = $3',
         [downloader, downloadDate, fileId]
       );
     } else {
-      // Последующие скачивания
       const newList = updateDownloaders(file.downloaded_by, downloader);
       if (newList !== file.downloaded_by) {
         await pool.query(
@@ -389,7 +384,7 @@ const imageMime = {
   '.svg': 'image/svg+xml'
 };
 
-// Просмотр изображения в браузере (inline)
+// Просмотр изображения
 app.get('/image/:id', async (req, res) => {
   const fileId = req.params.id;
   try {
@@ -463,7 +458,7 @@ app.post('/delete/:id', async (req, res) => {
   }
 });
 
-// Переключение статуса milled
+// Переключение статусов
 app.post('/toggle-milled/:id', async (req, res) => {
   if (!req.session.user) return res.status(401).send('Не авторизован');
   try {
@@ -475,7 +470,6 @@ app.post('/toggle-milled/:id', async (req, res) => {
   }
 });
 
-// Переключение статуса baked
 app.post('/toggle-baked/:id', async (req, res) => {
   if (!req.session.user) return res.status(401).send('Не авторизован');
   try {
@@ -487,7 +481,6 @@ app.post('/toggle-baked/:id', async (req, res) => {
   }
 });
 
-// Обновление комментария
 app.post('/comment/:id', async (req, res) => {
   if (!req.session.user) return res.status(401).send('Не авторизован');
   const { comment } = req.body;
@@ -506,7 +499,6 @@ app.get('/add-user', (req, res) => {
   res.render('add-user', { error: null });
 });
 
-// Проверка пароля и добавление пользователя
 app.post('/add-user', async (req, res) => {
   if (!req.session.user) return res.redirect('/login');
 
@@ -523,11 +515,264 @@ app.post('/add-user', async (req, res) => {
     await pool.query('INSERT INTO users (name) VALUES ($1)', [newUsername.trim()]);
     res.redirect('/');
   } catch (err) {
-    if (err.code === '23505') { // уникальность violation
+    if (err.code === '23505') {
       return res.render('add-user', { error: 'Пользователь с таким именем уже существует' });
     }
     console.error(err);
     res.render('add-user', { error: 'Ошибка базы данных' });
+  }
+});
+
+// ===== МАРШРУТЫ ДЛЯ УЧЁТА ТИТАНОВЫХ ОСНОВАНИЙ =====
+
+// Страница со списком оснований
+app.get('/titan', async (req, res) => {
+  try {
+    const { order_number, status, date_from, date_to } = req.query;
+    let sql = 'SELECT * FROM titan_orders';
+    const params = [];
+    const conditions = [];
+
+    if (order_number && order_number.trim() !== '') {
+      conditions.push(`order_number ILIKE $${params.length + 1}`);
+      params.push(`%${order_number}%`);
+    }
+    if (status && status !== 'all') {
+      conditions.push(`status = $${params.length + 1}`);
+      params.push(status);
+    }
+    if (date_from) {
+      conditions.push(`order_date >= $${params.length + 1}`);
+      params.push(date_from);
+    }
+    if (date_to) {
+      conditions.push(`order_date <= $${params.length + 1}`);
+      params.push(date_to);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY order_date DESC, created_at DESC';
+
+    const result = await pool.query(sql, params);
+    const orders = result.rows;
+
+    const today = new Date().toISOString().slice(0, 10);
+    const monthNames = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+    const monthNamesGen = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+    const byMonth = {};
+
+    orders.forEach(o => {
+      let dateStr = o.order_date;
+      if (!dateStr) return;
+      if (typeof dateStr === 'object' && dateStr.toISOString) {
+        dateStr = dateStr.toISOString().slice(0, 10);
+      } else {
+        dateStr = String(dateStr).slice(0, 10);
+      }
+      const [y, m] = dateStr.split('-').map(Number);
+      const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+      if (!byMonth[monthKey]) {
+        byMonth[monthKey] = { monthKey, monthLabel: `${monthNames[m-1]} ${y}`, days: {} };
+      }
+      if (!byMonth[monthKey].days[dateStr]) {
+        byMonth[monthKey].days[dateStr] = { dateKey: dateStr, isToday: dateStr === today, orders: [] };
+      }
+      byMonth[monthKey].days[dateStr].orders.push(o);
+    });
+
+    const groupedOrders = Object.keys(byMonth)
+      .sort((a, b) => b.localeCompare(a))
+      .map(k => {
+        const month = byMonth[k];
+        const dayKeys = Object.keys(month.days).sort((a, b) => b.localeCompare(a));
+        month.daysList = dayKeys.map(dk => {
+          const day = month.days[dk];
+          const [, mm, dd] = dk.split('-');
+          const mi = parseInt(mm, 10) - 1;
+          day.dayLabel = `${parseInt(dd, 10)} ${monthNamesGen[mi]} ${month.monthLabel.split(' ')[1]}`;
+          return day;
+        });
+        return month;
+      });
+
+    const isElena = (req.session.user === 'Елена');
+
+    res.render('titan', {
+      orders: orders,
+      groupedOrders: groupedOrders,
+      todayKey: today,
+      currentUser: req.session.user,
+      isElena: isElena,
+      filters: { order_number, status, date_from, date_to }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка базы данных');
+  }
+});
+
+// Добавление записей (несколько позиций)
+app.post('/titan/add', async (req, res) => {
+  if (!req.session.user) return res.redirect('/login');
+
+  const { order_date, order_number, items } = req.body;
+  let itemsArray = [];
+  if (items) {
+    if (Array.isArray(items)) {
+      itemsArray = items;
+    } else {
+      itemsArray = [items];
+    }
+  } else {
+    const { system_name, size, has_hex } = req.body;
+    if (system_name && size) {
+      itemsArray.push({ system_name, size, has_hex: has_hex === 'on' });
+    }
+  }
+
+  if (itemsArray.length === 0) {
+    return res.status(400).send('Нет данных для добавления');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const item of itemsArray) {
+      const sizeValue = parseFloat(item.size);
+      if (isNaN(sizeValue)) {
+        throw new Error(`Некорректное значение размера: ${item.size}`);
+      }
+      await client.query(
+        `INSERT INTO titan_orders 
+         (order_date, order_number, system_name, size, has_hex, created_by) 
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          order_date || new Date().toISOString().slice(0,10),
+          order_number,
+          item.system_name,
+          sizeValue,
+          item.has_hex === true || item.has_hex === 'on',
+          req.session.user
+        ]
+      );
+    }
+    await client.query('COMMIT');
+    res.redirect('/titan');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Ошибка при добавлении:', err);
+    res.status(500).send('Ошибка при добавлении: ' + err.message);
+  } finally {
+    client.release();
+  }
+});
+
+// Переключение статуса (только Елена)
+app.post('/titan/toggle-status/:id', async (req, res) => {
+  if (req.session.user !== 'Елена') {
+    return res.status(403).json({ success: false, message: 'Доступ запрещён' });
+  }
+  const id = req.params.id;
+  try {
+    const current = await pool.query('SELECT status FROM titan_orders WHERE id = $1', [id]);
+    if (current.rows.length === 0) return res.status(404).json({ success: false });
+    const newStatus = current.rows[0].status === 'pending' ? 'issued' : 'pending';
+    await pool.query('UPDATE titan_orders SET status = $1 WHERE id = $2', [newStatus, id]);
+    res.json({ success: true, newStatus });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Экспорт в Excel
+app.get('/titan/export', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM titan_orders ORDER BY order_date, order_number');
+    const rows = result.rows;
+
+    const groups = {};
+    rows.forEach(row => {
+      let dateStr = row.order_date;
+      if (typeof dateStr === 'object' && dateStr.toISOString) {
+        dateStr = dateStr.toISOString().slice(0, 10);
+      } else {
+        dateStr = String(dateStr).slice(0, 10);
+      }
+      const key = `${row.order_number}_${row.system_name}_${row.size}_${row.has_hex}`;
+      if (!groups[key]) {
+        groups[key] = {
+          order_date: dateStr,
+          order_number: row.order_number,
+          system_name: row.system_name,
+          size: row.size,
+          has_hex: row.has_hex ? 'Да' : 'Нет',
+          count: 0
+        };
+      }
+      groups[key].count++;
+    });
+
+    const data = Object.values(groups).sort((a, b) => {
+      if (a.order_number !== b.order_number) return a.order_number.localeCompare(b.order_number);
+      return a.order_date.localeCompare(b.order_date);
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Титановые основания');
+
+    worksheet.columns = [
+      { header: 'Дата', key: 'order_date', width: 12 },
+      { header: 'Наряд', key: 'order_number', width: 15 },
+      { header: 'Система', key: 'system_name', width: 25 },
+      { header: 'Размер', key: 'size', width: 10 },
+      { header: 'Позиционер', key: 'has_hex', width: 12 },
+      { header: 'Количество', key: 'count', width: 10 }
+    ];
+
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF4CAF50' }
+    };
+
+    worksheet.addRows(data);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=titan_export.xlsx');
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('Ошибка при создании Excel:', err);
+    res.status(500).send('Ошибка при создании Excel: ' + err.message);
+  }
+});
+
+// Печать (поддерживает фильтр по номеру наряда)
+app.get('/titan/print', async (req, res) => {
+  try {
+    const { order_number } = req.query;
+    let sql = 'SELECT * FROM titan_orders';
+    const params = [];
+    if (order_number) {
+      sql += ' WHERE order_number = $1';
+      params.push(order_number);
+    }
+    sql += ' ORDER BY order_date, order_number';
+    const result = await pool.query(sql, params);
+    const orders = result.rows;
+    orders.forEach(o => {
+      if (o.order_date && typeof o.order_date === 'object') {
+        o.order_date = o.order_date.toISOString().slice(0, 10);
+      }
+    });
+    res.render('titan_print', { orders, title: 'Печать нарядов', order_number: order_number || null });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка при загрузке данных для печати');
   }
 });
 

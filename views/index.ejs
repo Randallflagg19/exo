@@ -290,6 +290,9 @@
     <h1 class="page-header">Хранилище 3D-файлов 
         <span style="font-size: 0.7em;">(вы вошли как <strong><%= currentUser %></strong>)</span>
         <span class="header-buttons">
+            <% if (currentUser !== 'Елена') { %>
+                <a href="/titan" class="add-user-btn" style="background-color: #FF9800;">🔩 Титановые основания</a>
+            <% } %>
             <a href="/add-user" class="add-user-btn">➕ Добавить пользователя</a>
             <a href="/logout" class="logout">Выйти</a>
         </span>
@@ -299,13 +302,11 @@
     <div class="upload-form">
         <h2>Загрузить файлы</h2>
         <div id="uploadForm">
-            <!-- 3D файлы (множественный выбор) -->
             <div class="drop-zone" id="dropZoneStl">
                 <input type="file" id="stlFileInput" style="display: none;" multiple>
                 <p>Перетащите 3D-файлы сюда или кликните для выбора (можно несколько)</p>
                 <div class="file-name" id="stlFileName"></div>
             </div>
-            <!-- Фото (один файл) -->
             <div class="drop-zone" id="dropZoneImage">
                 <input type="file" id="imageFileInput" style="display: none;" accept="image/*">
                 <p>Перетащите фото сюда или кликните для выбора (необязательно)</p>
@@ -320,7 +321,7 @@
         </div>
     </div>
 
-    <!-- Фильтры -->
+    <!-- Фильтры с динамическим поиском -->
     <div class="filter-form">
         <h2>Фильтры</h2>
         <form method="get">
@@ -344,6 +345,10 @@
                     <option value="false" <%= filters.downloaded === 'false' ? 'selected' : '' %>>Не скачано</option>
                     <option value="true" <%= filters.downloaded === 'true' ? 'selected' : '' %>>Скачано</option>
                 </select>
+            </label>
+            <label>
+                Название файла (часть):
+                <input type="text" name="filename" value="<%= filters.filename || '' %>" placeholder="Введите часть имени...">
             </label>
             <button type="submit">Применить</button>
             <a href="/" class="reset-link">Сбросить</a>
@@ -501,10 +506,7 @@
         const uploadStatus = document.getElementById('uploadStatus');
 
         function setupDropZone(zone, input, fileNameDiv, isImage) {
-            // Клик по зоне открывает диалог выбора файла
             zone.addEventListener('click', () => input.click());
-
-            // Подсветка при перетаскивании
             zone.addEventListener('dragover', (e) => {
                 e.preventDefault();
                 zone.classList.add('dragover');
@@ -517,24 +519,15 @@
                 zone.classList.remove('dragover');
                 const files = e.dataTransfer.files;
                 if (files.length > 0) {
-                    // Для изображений берём только первый файл
                     if (isImage) {
-                        input.files = files; // это сработает, но лучше присвоить files вручную? Оставим так, но нужно учесть, что input.files read-only.
-                        // Но мы не можем напрямую присвоить input.files. Лучше обработать через DataTransfer.
-                        // Просто сохраним в переменную и обновим отображение.
-                        // В целях простоты будем использовать глобальные переменные, как раньше.
-                        // Для изображений мы всё равно используем отдельную переменную, поэтому назначим selectedImageFile.
                         selectedImageFile = files[0];
                         imageFileName.textContent = files[0].name;
                     } else {
-                        // Для STL можно сохранить все файлы
                         selectedStlFiles = Array.from(files);
                         stlFileName.textContent = selectedStlFiles.map(f => f.name).join(', ');
                     }
                 }
             });
-
-            // Выбор файла через input
             input.addEventListener('change', () => {
                 if (input.files.length > 0) {
                     if (isImage) {
@@ -562,14 +555,12 @@
         setupDropZone(stlDropZone, stlInput, stlFileName, false);
         setupDropZone(imageDropZone, imageInput, imageFileName, true);
 
-        // Отправка формы через AJAX
         uploadBtn.addEventListener('click', () => {
             if (selectedStlFiles.length === 0) {
                 uploadStatus.textContent = 'Ошибка: выберите хотя бы один 3D-файл.';
                 uploadStatus.className = 'upload-status error';
                 return;
             }
-
             const formData = new FormData();
             selectedStlFiles.forEach(file => {
                 formData.append('stlFiles', file);
@@ -577,7 +568,6 @@
             if (selectedImageFile) {
                 formData.append('imageFile', selectedImageFile);
             }
-            // Поля milled/baked пока не используются в форме, но можно добавить позже
             formData.append('milled', 'off');
             formData.append('baked', 'off');
             formData.append('comment', commentText.value);
@@ -602,7 +592,6 @@
             });
         });
 
-        // Функции для работы со статусами и комментариями (AJAX)
         function toggleStatus(id, type, checkboxEl) {
             const wasChecked = checkboxEl.checked;
             fetch(`/toggle-${type}/${id}`, { method: 'POST' })
@@ -639,11 +628,9 @@
             }
         }
 
-        // Удаление
         function deleteFile(id) {
             const code = prompt('Введите код подтверждения (78):');
             if (code === null) return;
-            
             fetch(`/delete/${id}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -658,6 +645,25 @@
             })
             .catch(err => alert('Ошибка сети: ' + err));
         }
+
+        // Динамический поиск с задержкой (debounce) для главной страницы
+        (function() {
+            const searchInput = document.querySelector('input[name="filename"]');
+            if (!searchInput) return;
+
+            let searchTimeout;
+            searchInput.addEventListener('input', function(e) {
+                clearTimeout(searchTimeout);
+                searchTimeout = setTimeout(() => {
+                    const form = document.querySelector('.filter-form form');
+                    if (form) {
+                        const formData = new FormData(form);
+                        const params = new URLSearchParams(formData).toString();
+                        window.location.href = '/?' + params;
+                    }
+                }, 600);
+            });
+        })();
     </script>
 </body>
 </html>
