@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Учёт титановых оснований</title>
     <style>
-        /* стили без изменений */
         body {
             font-family: Arial, sans-serif;
             margin: 20px;
@@ -182,7 +181,8 @@
     <div class="page-header">
         <h1>🔩 Учёт титановых оснований</h1>
         <div class="header-buttons">
-            <a href="/titan/export" class="btn btn-green">📊 Excel</a>
+            <!-- ИСПРАВЛЕННАЯ ССЫЛКА EXCEL -->
+            <a href="/titan/export?order_number=<%= filters.order_number || '' %>&status=<%= filters.status || '' %>&date_from=<%= filters.date_from || '' %>&date_to=<%= filters.date_to || '' %>" class="btn btn-green">📊 Excel</a>
             <a href="/titan/print" target="_blank" class="btn btn-print">🖨️ Печать всех</a>
             <a href="/" class="btn btn-orange">📁 Файлы</a>
             <a href="/add-user" class="btn">➕ Пользователя</a>
@@ -197,7 +197,7 @@
             <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 15px;">
                 <label>
                     Дата:
-                    <input type="date" name="order_date" value="<%= new Date().toISOString().slice(0,10) %>">
+                    <input type="date" name="order_date" value="<%= new Date(new Date().getTime() - (new Date().getTimezoneOffset() * 60000)).toISOString().slice(0,10) %>">
                 </label>
                 <label>
                     Номер наряда:
@@ -245,7 +245,7 @@
     <!-- Фильтры -->
     <div class="filter-form">
         <h3>Фильтры</h3>
-        <form method="get">
+        <form method="get" id="filterForm">
             <label>
                 Номер наряда:
                 <input type="text" name="order_number" value="<%= filters.order_number || '' %>" placeholder="Часть номера">
@@ -260,13 +260,20 @@
             </label>
             <label>
                 Дата с:
-                <input type="date" name="date_from" value="<%= filters.date_from || '' %>">
+                <input type="date" name="date_from" id="date_from" value="<%= filters.date_from || '' %>">
             </label>
             <label>
                 по:
-                <input type="date" name="date_to" value="<%= filters.date_to || '' %>">
+                <input type="date" name="date_to" id="date_to" value="<%= filters.date_to || '' %>">
             </label>
             <button type="submit">Применить</button>
+            
+            <!-- Кнопка печати по датам (только date_from/date_to) -->
+            <button type="button" id="printDayBtn" class="btn btn-print">🖨️ Печать за период</button>
+            
+            <!-- Кнопка печати по всем фильтрам (номер, статус, даты) -->
+            <button type="button" id="printWithFiltersBtn" class="btn btn-print">🖨️ Печать по фильтру</button>
+            
             <a href="/titan" class="reset-link">Сбросить</a>
         </form>
     </div>
@@ -282,7 +289,6 @@
                 <th>Размер</th>
                 <th>Позиционер</th>
                 <th>Статус</th>
-                <!-- NEW: колонка Техник -->
                 <th>Техник</th>
                 <% if (isElena) { %>
                 <th>Действие</th>
@@ -291,16 +297,13 @@
         </thead>
         <tbody id="ordersTableBody">
             <% if (orders.length === 0) { %>
-                <!-- colspan увеличен на 1 из-за новой колонки -->
                 <tr><td colspan="<%= isElena ? 8 : 7 %>" style="text-align:center;">Нет записей</td></tr>
             <% } else { %>
                 <% groupedOrders.forEach(month => { %>
-                    <!-- colspan увеличен на 1 -->
                     <tr class="group-month-row" data-group="month" data-month-key="<%= month.monthKey %>">
                         <td colspan="<%= isElena ? 8 : 7 %>"><span class="group-toggle" data-month-key="<%= month.monthKey %>">▼</span><%= month.monthLabel %></td>
                     </tr>
                     <% month.daysList.forEach(day => { %>
-                        <!-- colspan увеличен на 1 -->
                         <tr class="group-day-row <%= day.isToday ? 'day-today' : '' %>" data-group="day" data-month-key="<%= month.monthKey %>" data-day-key="<%= day.dateKey %>" data-today="<%= day.isToday ? '1' : '0' %>">
                             <td colspan="<%= isElena ? 8 : 7 %>"><span class="group-toggle" style="margin-left: 20px;" data-day-key="<%= day.dateKey %>"><%= day.isToday ? '▼' : '▼' %></span><%= day.dayLabel %><% if (day.isToday) { %> <em>(сегодня)</em><% } %></td>
                         </tr>
@@ -319,7 +322,6 @@
                                         <%= order.status === 'pending' ? 'Не выдано' : 'Выдано' %>
                                     </span>
                                 </td>
-                                <!-- NEW: ячейка с техником -->
                                 <td><%= order.created_by || '-' %></td>
                                 <% if (isElena) { %>
                                 <td>
@@ -337,7 +339,6 @@
     </table>
 
     <script>
-        // (JavaScript остаётся без изменений, кроме colspan он не использует)
         // Сворачивание по месяцам и дням
         (function() {
             const tbody = document.getElementById('ordersTableBody');
@@ -495,6 +496,32 @@
                 }
             });
         })();
+
+        // Печать за выбранный диапазон дат (только date_from/date_to)
+        document.getElementById('printDayBtn').addEventListener('click', function() {
+            const dateFrom = document.getElementById('date_from').value;
+            const dateTo = document.getElementById('date_to').value;
+            
+            if (!dateFrom && !dateTo) {
+                alert('Выберите хотя бы одну дату');
+                return;
+            }
+            
+            let url = '/titan/print?';
+            if (dateFrom) url += `date_from=${dateFrom}&`;
+            if (dateTo) url += `date_to=${dateTo}`;
+            url = url.replace(/[&]$/, '');
+            
+            window.open(url, '_blank');
+        });
+
+        // Печать с учётом всех текущих фильтров (order_number, status, date_from, date_to)
+        document.getElementById('printWithFiltersBtn').addEventListener('click', function() {
+            const form = document.getElementById('filterForm');
+            const formData = new FormData(form);
+            const params = new URLSearchParams(formData).toString();
+            window.open('/titan/print?' + params, '_blank');
+        });
     </script>
 </body>
 </html>

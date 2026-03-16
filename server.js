@@ -525,7 +525,7 @@ app.post('/add-user', async (req, res) => {
 
 // ===== МАРШРУТЫ ДЛЯ УЧЁТА ТИТАНОВЫХ ОСНОВАНИЙ =====
 
-// Страница со списком оснований
+// Страница со списком оснований (ИСПРАВЛЕННАЯ)
 app.get('/titan', async (req, res) => {
   try {
     const { order_number, status, date_from, date_to } = req.query;
@@ -558,7 +558,13 @@ app.get('/titan', async (req, res) => {
     const result = await pool.query(sql, params);
     const orders = result.rows;
 
-    const today = new Date().toISOString().slice(0, 10);
+    // ИСПРАВЛЕНО: используем локальную дату
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    const todayKey = `${year}-${month}-${day}`;
+
     const monthNames = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
     const monthNamesGen = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
     const byMonth = {};
@@ -567,7 +573,11 @@ app.get('/titan', async (req, res) => {
       let dateStr = o.order_date;
       if (!dateStr) return;
       if (typeof dateStr === 'object' && dateStr.toISOString) {
-        dateStr = dateStr.toISOString().slice(0, 10);
+        const d = new Date(dateStr);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dday = String(d.getDate()).padStart(2, '0');
+        dateStr = `${y}-${m}-${dday}`;
       } else {
         dateStr = String(dateStr).slice(0, 10);
       }
@@ -577,7 +587,7 @@ app.get('/titan', async (req, res) => {
         byMonth[monthKey] = { monthKey, monthLabel: `${monthNames[m-1]} ${y}`, days: {} };
       }
       if (!byMonth[monthKey].days[dateStr]) {
-        byMonth[monthKey].days[dateStr] = { dateKey: dateStr, isToday: dateStr === today, orders: [] };
+        byMonth[monthKey].days[dateStr] = { dateKey: dateStr, isToday: dateStr === todayKey, orders: [] };
       }
       byMonth[monthKey].days[dateStr].orders.push(o);
     });
@@ -602,7 +612,7 @@ app.get('/titan', async (req, res) => {
     res.render('titan', {
       orders: orders,
       groupedOrders: groupedOrders,
-      todayKey: today,
+      todayKey: todayKey, // передаём исправленную дату
       currentUser: req.session.user,
       isElena: isElena,
       filters: { order_number, status, date_from, date_to }
@@ -687,17 +697,48 @@ app.post('/titan/toggle-status/:id', async (req, res) => {
   }
 });
 
-// Экспорт в Excel
+// Экспорт в Excel (с учётом текущих фильтров)
 app.get('/titan/export', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM titan_orders ORDER BY order_date, order_number');
+    const { order_number, status, date_from, date_to } = req.query;
+    let sql = 'SELECT * FROM titan_orders';
+    const params = [];
+    const conditions = [];
+
+    if (order_number && order_number.trim() !== '') {
+      conditions.push(`order_number ILIKE $${params.length + 1}`);
+      params.push(`%${order_number}%`);
+    }
+    if (status && status !== 'all') {
+      conditions.push(`status = $${params.length + 1}`);
+      params.push(status);
+    }
+    if (date_from) {
+      conditions.push(`order_date >= $${params.length + 1}`);
+      params.push(date_from);
+    }
+    if (date_to) {
+      conditions.push(`order_date <= $${params.length + 1}`);
+      params.push(date_to);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY order_date, order_number';
+
+    const result = await pool.query(sql, params);
     const rows = result.rows;
 
     const groups = {};
     rows.forEach(row => {
       let dateStr = row.order_date;
       if (typeof dateStr === 'object' && dateStr.toISOString) {
-        dateStr = dateStr.toISOString().slice(0, 10);
+        const d = new Date(dateStr);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dday = String(d.getDate()).padStart(2, '0');
+        dateStr = `${y}-${m}-${dday}`;
       } else {
         dateStr = String(dateStr).slice(0, 10);
       }
@@ -751,25 +792,63 @@ app.get('/titan/export', async (req, res) => {
   }
 });
 
-// Печать (поддерживает фильтр по номеру наряда)
+// Печать (поддерживает фильтр по номеру наряда и диапазону дат)
 app.get('/titan/print', async (req, res) => {
   try {
-    const { order_number } = req.query;
+    const { order_number, date_from, date_to } = req.query;
     let sql = 'SELECT * FROM titan_orders';
     const params = [];
+    const conditions = [];
+
     if (order_number) {
-      sql += ' WHERE order_number = $1';
-      params.push(order_number);
+      conditions.push(`order_number ILIKE $${params.length + 1}`);
+      params.push(`%${order_number}%`);
+    }
+    if (date_from) {
+      conditions.push(`order_date >= $${params.length + 1}`);
+      params.push(date_from);
+    }
+    if (date_to) {
+      conditions.push(`order_date <= $${params.length + 1}`);
+      params.push(date_to);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
     }
     sql += ' ORDER BY order_date, order_number';
+
     const result = await pool.query(sql, params);
     const orders = result.rows;
     orders.forEach(o => {
       if (o.order_date && typeof o.order_date === 'object') {
-        o.order_date = o.order_date.toISOString().slice(0, 10);
+        const d = new Date(o.order_date);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dday = String(d.getDate()).padStart(2, '0');
+        o.order_date = `${y}-${m}-${dday}`;
       }
     });
-    res.render('titan_print', { orders, title: 'Печать нарядов', order_number: order_number || null });
+
+    let title = 'Печать нарядов';
+    if (order_number) {
+      title = `Наряд № ${order_number}`;
+    } else if (date_from && date_to) {
+      title = `Период с ${date_from} по ${date_to}`;
+    } else if (date_from) {
+      title = `С ${date_from}`;
+    } else if (date_to) {
+      title = `По ${date_to}`;
+    }
+
+    res.render('titan_print', { 
+      orders, 
+      title: 'Печать нарядов',
+      subtitle: title,
+      order_number: order_number || null,
+      date_from: date_from || null,
+      date_to: date_to || null
+    });
   } catch (err) {
     console.error(err);
     res.status(500).send('Ошибка при загрузке данных для печати');
