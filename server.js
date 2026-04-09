@@ -1,12 +1,14 @@
+require('dotenv').config();
 const express = require('express');
 const session = require('express-session');
 const multer = require('multer');
-const sqlite3 = require('sqlite3').verbose();
+const { Pool } = require('pg');
 const path = require('path');
 const fs = require('fs');
+const ExcelJS = require('exceljs');
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // ------ Определяем корневую папку приложения ------
 const appRoot = process.env.PKG 
@@ -15,108 +17,107 @@ const appRoot = process.env.PKG
 
 console.log('Корневая папка приложения:', appRoot);
 
-// ------ Пароль для добавления новых пользователей ------
-const ADD_USER_PASSWORD = '545';
+// ------ Пароль для добавления новых пользователей (из .env) ------
+const ADD_USER_PASSWORD = process.env.ADD_USER_PASSWORD || '545';
 
 // Пути к папкам для данных
 const uploadDir = path.join(appRoot, 'uploads');
 const dbDir = path.join(appRoot, 'database');
-const dbPath = path.join(dbDir, 'files.db');
 
-// Создаём папки, если их нет
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
   console.log('Создана папка для загрузок:', uploadDir);
 }
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-  console.log('Создана папка для базы данных:', dbDir);
-}
 
-// ------ Подключение к базе данных SQLite ------
-const db = new sqlite3.Database(dbPath);
+// ------ Подключение к PostgreSQL ------
+const pool = new Pool({
+  host: process.env.DB_HOST || 'localhost',
+  port: process.env.DB_PORT || 5432,
+  user: process.env.DB_USER || 'postgres',
+  password: process.env.DB_PASSWORD || 'postgres',
+  database: process.env.DB_NAME || 'exostart',
+  max: 20,
+  idleTimeoutMillis: 30000,
+});
 
-// Инициализация таблиц
-db.serialize(() => {
-  // Таблица файлов (с поддержкой изображений, статусов и комментария)
-  db.run(`
-    CREATE TABLE IF NOT EXISTS files (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      original_name TEXT NOT NULL,
-      stored_name TEXT NOT NULL,
-      image_name TEXT,
-      uploader TEXT NOT NULL,
-      upload_date TEXT NOT NULL,
-      downloaded BOOLEAN DEFAULT 0,
-      downloaded_by TEXT,
-      downloaded_date TEXT,
-      milled BOOLEAN DEFAULT 0,
-      baked BOOLEAN DEFAULT 0,
-      comment TEXT
-    )
-  `);
+pool.connect((err, client, release) => {
+  if (err) {
+    console.error('Ошибка подключения к PostgreSQL:', err.stack);
+    process.exit(1);
+  } else {
+    console.log('✅ Подключено к PostgreSQL');
+    release();
+  }
+});
 
-  // Таблица пользователей
-  db.run(`
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT UNIQUE NOT NULL
-    )
-  `);
+// ------ Инициализация таблиц ------
+async function initDb() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS files (
+        id SERIAL PRIMARY KEY,
+        original_name TEXT NOT NULL,
+        stored_name TEXT NOT NULL,
+        image_name TEXT,
+        uploader TEXT NOT NULL,
+        upload_date TEXT NOT NULL,
+        downloaded BOOLEAN DEFAULT FALSE,
+        downloaded_by TEXT,
+        downloaded_date TEXT,
+        milled BOOLEAN DEFAULT FALSE,
+        baked BOOLEAN DEFAULT FALSE,
+        comment TEXT
+      )
+    `);
+    console.log('Таблица files проверена/создана');
 
-  // Добавляем новые колонки, если их нет (для старых баз)
-  const checkAndAddColumn = (columnName, columnDef) => {
-    db.all("PRAGMA table_info(files)", (err, rows) => {
-      if (err) {
-        console.error('Ошибка при проверке структуры таблицы files:', err);
-        return;
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        name TEXT UNIQUE NOT NULL
+      )
+    `);
+    console.log('Таблица users проверена/создана');
+
+    const checkAndAddColumn = async (table, column, definition) => {
+      const res = await pool.query(`
+        SELECT column_name 
+        FROM information_schema.columns 
+        WHERE table_name = $1 AND column_name = $2
+      `, [table, column]);
+      if (res.rows.length === 0) {
+        await pool.query(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        console.log(`Колонка ${column} добавлена в таблицу ${table}`);
       }
-      const hasColumn = rows.some(row => row.name === columnName);
-      if (!hasColumn) {
-        db.run(`ALTER TABLE files ADD COLUMN ${columnName} ${columnDef}`, (alterErr) => {
-          if (alterErr) {
-            console.error(`Не удалось добавить колонку ${columnName}:`, alterErr);
-          } else {
-            console.log(`Колонка ${columnName} успешно добавлена`);
-          }
-        });
-      }
-    });
-  };
+    };
 
-  checkAndAddColumn('image_name', 'TEXT');
-  checkAndAddColumn('milled', 'BOOLEAN DEFAULT 0');
-  checkAndAddColumn('baked', 'BOOLEAN DEFAULT 0');
-  checkAndAddColumn('comment', 'TEXT');
+    await checkAndAddColumn('files', 'image_name', 'TEXT');
+    await checkAndAddColumn('files', 'milled', 'BOOLEAN DEFAULT FALSE');
+    await checkAndAddColumn('files', 'baked', 'BOOLEAN DEFAULT FALSE');
+    await checkAndAddColumn('files', 'comment', 'TEXT');
 
-  // Если таблица пользователей пуста, заполняем начальными именами (новый список)
-  db.get("SELECT COUNT(*) AS count FROM users", (err, row) => {
-    if (err) {
-      console.error('Ошибка при проверке users:', err);
-      return;
-    }
-    if (row.count === 0) {
+    const userCount = await pool.query('SELECT COUNT(*) FROM users');
+    if (parseInt(userCount.rows[0].count) === 0) {
       const defaultUsers = [
         'София', 'Анна', 'Маргарита', 'Слава', 'Егор',
         'Наталья', 'Мария', 'Сухроб', 'Абу', 'Альберт', 'Юлия'
       ];
-      const stmt = db.prepare("INSERT INTO users (name) VALUES (?)");
-      defaultUsers.forEach(name => {
-        stmt.run(name, err => {
-          if (err) console.error('Ошибка вставки пользователя:', err);
-        });
-      });
-      stmt.finalize();
+      for (const name of defaultUsers) {
+        await pool.query('INSERT INTO users (name) VALUES ($1) ON CONFLICT DO NOTHING', [name]);
+      }
       console.log('Добавлены начальные пользователи');
     }
-  });
-});
+  } catch (err) {
+    console.error('Ошибка инициализации БД:', err);
+    process.exit(1);
+  }
+}
+initDb();
 
 // ------ Настройка Express ------
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use((req, res, next) => {
-  // Не ставим text/html для маршрутов, отдающих файлы — иначе картинки открываются как текст
   const isFileRoute = req.path.startsWith('/image/') || req.path.startsWith('/download');
   if (!isFileRoute) {
     res.setHeader('Content-Type', 'text/html; charset=UTF-8');
@@ -124,7 +125,7 @@ app.use((req, res, next) => {
   next();
 });
 app.use(session({
-  secret: 'your-secret-key-change-this',
+  secret: process.env.SESSION_SECRET || 'your-secret-key-change-this',
   resave: false,
   saveUninitialized: true,
   cookie: { maxAge: 24 * 60 * 60 * 1000 }
@@ -134,7 +135,7 @@ app.use(express.static(path.join(appRoot, 'public')));
 app.set('view engine', 'ejs');
 app.set('views', path.join(appRoot, 'views'));
 
-// ------ Multer для загрузки файлов (с сохранением в подпапку пользователя) ------
+// ------ Multer для загрузки файлов ------
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const userDir = path.join(uploadDir, req.session.user);
@@ -144,11 +145,11 @@ const storage = multer.diskStorage({
     cb(null, userDir);
   },
   filename: (req, file, cb) => {
-    // Декодируем имя из latin1 в utf8 (как было)
     const decodedName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    // Защита от path traversal — берём только имя файла
     const safeName = path.basename(decodedName);
-    cb(null, safeName);
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    const uniqueName = uniqueSuffix + '-' + safeName;
+    cb(null, uniqueName);
   }
 });
 const upload = multer({ storage: storage });
@@ -167,54 +168,64 @@ app.use((req, res, next) => {
 // ------ Маршруты ------
 
 // Страница входа
-app.get('/login', (req, res) => {
-  db.all("SELECT name FROM users ORDER BY name", (err, rows) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).send('Ошибка БД');
-    }
-    const users = rows.map(row => row.name);
-    res.render('login', { users: users });
-  });
+app.get('/login', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT name FROM users ORDER BY name');
+    const users = result.rows.map(row => row.name);
+    res.render('login', { users });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка БД');
+  }
 });
 
-// Обработка выбора пользователя
-app.post('/set-user', (req, res) => {
+app.post('/set-user', async (req, res) => {
   const username = req.body.username;
-  db.get("SELECT name FROM users WHERE name = ?", [username], (err, row) => {
-    if (err || !row) {
+  try {
+    const result = await pool.query('SELECT name FROM users WHERE name = $1', [username]);
+    if (result.rows.length === 0) {
       return res.redirect('/login');
     }
     req.session.user = username;
     res.redirect('/');
-  });
+  } catch (err) {
+    console.error(err);
+    res.redirect('/login');
+  }
 });
 
-// Выход
 app.get('/logout', (req, res) => {
   req.session.destroy();
   res.redirect('/login');
 });
 
-// Главная страница
-app.get('/', (req, res) => {
-  const { date, uploader, downloaded } = req.query;
+// Главная страница (с перенаправлением для Елены и динамическим поиском)
+app.get('/', async (req, res) => {
+  if (req.session.user === 'Елена') {
+    return res.redirect('/titan');
+  }
+
+  const { date, uploader, downloaded, filename } = req.query;
 
   let sql = 'SELECT * FROM files';
   const params = [];
   const conditions = [];
 
   if (date) {
-    conditions.push('date(upload_date) = ?');
+    conditions.push('date(upload_date) = $' + (params.length + 1));
     params.push(date);
   }
   if (uploader) {
-    conditions.push('uploader = ?');
+    conditions.push('uploader = $' + (params.length + 1));
     params.push(uploader);
   }
   if (downloaded !== undefined && downloaded !== '') {
-    conditions.push('downloaded = ?');
-    params.push(downloaded === 'true' ? 1 : 0);
+    conditions.push('downloaded = $' + (params.length + 1));
+    params.push(downloaded === 'true');
+  }
+  if (filename && filename.trim() !== '') {
+    conditions.push('original_name ILIKE $' + (params.length + 1));
+    params.push('%' + filename + '%');
   }
 
   if (conditions.length > 0) {
@@ -223,14 +234,11 @@ app.get('/', (req, res) => {
 
   sql += ' ORDER BY upload_date DESC';
 
-  db.all(sql, params, (err, files) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).send('Ошибка базы данных');
-    }
+  try {
+    const filesResult = await pool.query(sql, params);
+    const files = filesResult.rows;
 
-    // Группировка по месяцу и дню для сворачивания (новые сверху)
-    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const today = new Date().toISOString().slice(0, 10);
     const monthNames = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
     const monthNamesGen = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
     const byMonth = {};
@@ -262,93 +270,110 @@ app.get('/', (req, res) => {
         return month;
       });
 
-    db.all('SELECT DISTINCT uploader FROM files', (err, rows) => {
-      const uploaders = rows.map(row => row.uploader);
-      res.render('index', {
-        files: files,
-        groupedFiles,
-        todayKey: today,
-        users: uploaders,
-        currentUser: req.session.user,
-        filters: { date, uploader, downloaded }
-      });
+    const uploadersResult = await pool.query('SELECT DISTINCT uploader FROM files');
+    const uploaders = uploadersResult.rows.map(row => row.uploader);
+
+    res.render('index', {
+      files,
+      groupedFiles,
+      todayKey: today,
+      users: uploaders,
+      currentUser: req.session.user,
+      filters: { date, uploader, downloaded, filename }
     });
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка базы данных');
+  }
 });
 
-// Загрузка файла (с новыми полями)
+// Загрузка файлов
 app.post('/upload', upload.fields([
-  { name: 'stlFile', maxCount: 1 },
+  { name: 'stlFiles', maxCount: 20 },
   { name: 'imageFile', maxCount: 1 }
-]), (req, res) => {
-  if (!req.files || !req.files['stlFile']) {
-    return res.status(400).send('3D-файл не выбран.');
+]), async (req, res) => {
+  if (!req.files || !req.files['stlFiles'] || req.files['stlFiles'].length === 0) {
+    return res.status(400).send('Не выбрано ни одного 3D-файла.');
   }
 
-  const stlFile = req.files['stlFile'][0];
+  const stlFiles = req.files['stlFiles'];
   const imageFile = req.files['imageFile'] ? req.files['imageFile'][0] : null;
-
-  // Декодируем оригинальное имя STL (для БД)
-  const decodedStlName = Buffer.from(stlFile.originalname, 'latin1').toString('utf8');
-  const storedStlName = stlFile.filename; // уже безопасное имя
-  let imageName = null;
-
-  if (imageFile) {
-    // Для изображения тоже декодируем имя, но сохраняем как есть
-    imageName = imageFile.filename;
-  }
+  let imageName = imageFile ? imageFile.filename : null;
 
   const uploader = req.session.user;
   const uploadDate = new Date().toISOString();
-
-  // Новые поля
-  const milled = req.body.milled === 'on' ? 1 : 0;
-  const baked = req.body.baked === 'on' ? 1 : 0;
+  const milled = req.body.milled === 'on';
+  const baked = req.body.baked === 'on';
   const comment = req.body.comment || '';
 
-  db.run(
-    `INSERT INTO files 
-     (original_name, stored_name, image_name, uploader, upload_date, downloaded, milled, baked, comment) 
-     VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-    [decodedStlName, storedStlName, imageName, uploader, uploadDate, milled, baked, comment],
-    function(err) {
-      if (err) {
-        console.error(err);
-        return res.status(500).send('Ошибка при сохранении в БД.');
-      }
-      res.redirect('/');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const stlFile of stlFiles) {
+      const decodedStlName = Buffer.from(stlFile.originalname, 'latin1').toString('utf8');
+      const storedStlName = stlFile.filename;
+      await client.query(
+        `INSERT INTO files 
+         (original_name, stored_name, image_name, uploader, upload_date, downloaded, milled, baked, comment) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [decodedStlName, storedStlName, imageName, uploader, uploadDate, false, milled, baked, comment]
+      );
     }
-  );
+    await client.query('COMMIT');
+    res.redirect('/');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Ошибка при загрузке файлов:', err);
+    res.status(500).send('Ошибка при сохранении в БД.');
+  } finally {
+    client.release();
+  }
 });
 
-// Скачивание 3D-файла (всегда доступно)
-app.get('/download/:id', (req, res) => {
+// Скачивание 3D-файла
+app.get('/download/:id', async (req, res) => {
   const fileId = req.params.id;
   const downloader = req.session.user;
 
-  db.get('SELECT * FROM files WHERE id = ?', [fileId], (err, file) => {
-    if (err || !file) {
+  try {
+    const fileResult = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    if (fileResult.rows.length === 0) {
       return res.status(404).send('Файл не найден.');
     }
+    const file = fileResult.rows[0];
 
-    // Если файл ещё не был скачан, помечаем это
+    const updateDownloaders = (currentList, newUser) => {
+      if (!currentList) return newUser;
+      const users = currentList.split(',').map(u => u.trim());
+      if (users.includes(newUser)) return currentList;
+      return currentList + ', ' + newUser;
+    };
+
     if (!file.downloaded) {
       const downloadDate = new Date().toISOString();
-      db.run(
-        'UPDATE files SET downloaded = 1, downloaded_by = ?, downloaded_date = ? WHERE id = ?',
-        [downloader, downloadDate, fileId],
-        (updateErr) => {
-          if (updateErr) console.error(updateErr);
-        }
+      await pool.query(
+        'UPDATE files SET downloaded = TRUE, downloaded_by = $1, downloaded_date = $2 WHERE id = $3',
+        [downloader, downloadDate, fileId]
       );
+    } else {
+      const newList = updateDownloaders(file.downloaded_by, downloader);
+      if (newList !== file.downloaded_by) {
+        await pool.query(
+          'UPDATE files SET downloaded_by = $1 WHERE id = $2',
+          [newList, fileId]
+        );
+      }
     }
 
     const filePath = path.join(uploadDir, file.uploader, file.stored_name);
     res.download(filePath, file.original_name);
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка сервера');
+  }
 });
 
-// MIME-типы для изображений (чтобы браузер открывал картинку, а не показывал бинарник)
+// MIME-типы для изображений
 const imageMime = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -359,40 +384,46 @@ const imageMime = {
   '.svg': 'image/svg+xml'
 };
 
-// Просмотр изображения в браузере (inline)
-app.get('/image/:id', (req, res) => {
+// Просмотр изображения
+app.get('/image/:id', async (req, res) => {
   const fileId = req.params.id;
-
-  db.get('SELECT image_name, uploader FROM files WHERE id = ?', [fileId], (err, file) => {
-    if (err || !file || !file.image_name) {
+  try {
+    const result = await pool.query('SELECT image_name, uploader FROM files WHERE id = $1', [fileId]);
+    if (result.rows.length === 0 || !result.rows[0].image_name) {
       return res.status(404).send('Изображение не найдено.');
     }
-
+    const file = result.rows[0];
     const imagePath = path.join(uploadDir, file.uploader, file.image_name);
     const ext = path.extname(file.image_name).toLowerCase();
     const contentType = imageMime[ext] || 'image/png';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', 'inline');
     res.sendFile(imagePath);
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка сервера');
+  }
 });
 
-// Скачивание изображения (attachment)
-app.get('/download-image/:id', (req, res) => {
+// Скачивание изображения
+app.get('/download-image/:id', async (req, res) => {
   const fileId = req.params.id;
-
-  db.get('SELECT image_name, uploader, original_name FROM files WHERE id = ?', [fileId], (err, file) => {
-    if (err || !file || !file.image_name) {
+  try {
+    const result = await pool.query('SELECT image_name, uploader, original_name FROM files WHERE id = $1', [fileId]);
+    if (result.rows.length === 0 || !result.rows[0].image_name) {
       return res.status(404).send('Изображение не найдено.');
     }
-
+    const file = result.rows[0];
     const imagePath = path.join(uploadDir, file.uploader, file.image_name);
-    res.download(imagePath, file.original_name); // или другое имя
-  });
+    res.download(imagePath, file.original_name);
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка сервера');
+  }
 });
 
-// Удаление файла (с кодом 78)
-app.post('/delete/:id', (req, res) => {
+// Удаление файла
+app.post('/delete/:id', async (req, res) => {
   const fileId = req.params.id;
   const { code } = req.body;
 
@@ -400,10 +431,12 @@ app.post('/delete/:id', (req, res) => {
     return res.status(403).send('Неверный код');
   }
 
-  db.get('SELECT * FROM files WHERE id = ?', [fileId], (err, file) => {
-    if (err || !file) {
+  try {
+    const fileResult = await pool.query('SELECT * FROM files WHERE id = $1', [fileId]);
+    if (fileResult.rows.length === 0) {
       return res.status(404).send('Файл не найден');
     }
+    const file = fileResult.rows[0];
 
     const stlPath = path.join(uploadDir, file.uploader, file.stored_name);
     fs.unlink(stlPath, (err) => {
@@ -417,56 +450,56 @@ app.post('/delete/:id', (req, res) => {
       });
     }
 
-    db.run('DELETE FROM files WHERE id = ?', fileId, function(err) {
-      if (err) {
-        console.error(err);
-        return res.status(500).send('Ошибка при удалении из БД');
-      }
-      res.redirect('/');
-    });
-  });
+    await pool.query('DELETE FROM files WHERE id = $1', [fileId]);
+    res.redirect('/');
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка при удалении из БД');
+  }
 });
 
-// ------ Управление статусами и комментариями (AJAX) ------
-
-// Переключение статуса milled
-app.post('/toggle-milled/:id', (req, res) => {
+// Переключение статусов
+app.post('/toggle-milled/:id', async (req, res) => {
   if (!req.session.user) return res.status(401).send('Не авторизован');
-  db.run('UPDATE files SET milled = NOT milled WHERE id = ?', [req.params.id], function(err) {
-    if (err) return res.status(500).send('Ошибка БД');
+  try {
+    await pool.query('UPDATE files SET milled = NOT milled WHERE id = $1', [req.params.id]);
     res.json({ success: true });
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка БД');
+  }
 });
 
-// Переключение статуса baked
-app.post('/toggle-baked/:id', (req, res) => {
+app.post('/toggle-baked/:id', async (req, res) => {
   if (!req.session.user) return res.status(401).send('Не авторизован');
-  db.run('UPDATE files SET baked = NOT baked WHERE id = ?', [req.params.id], function(err) {
-    if (err) return res.status(500).send('Ошибка БД');
+  try {
+    await pool.query('UPDATE files SET baked = NOT baked WHERE id = $1', [req.params.id]);
     res.json({ success: true });
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка БД');
+  }
 });
 
-// Обновление комментария
-app.post('/comment/:id', (req, res) => {
+app.post('/comment/:id', async (req, res) => {
   if (!req.session.user) return res.status(401).send('Не авторизован');
   const { comment } = req.body;
-  db.run('UPDATE files SET comment = ? WHERE id = ?', [comment, req.params.id], function(err) {
-    if (err) return res.status(500).send('Ошибка БД');
+  try {
+    await pool.query('UPDATE files SET comment = $1 WHERE id = $2', [comment, req.params.id]);
     res.json({ success: true });
-  });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка БД');
+  }
 });
 
-// ------ Управление пользователями ------
-
-// Страница добавления пользователя (только для авторизованных)
+// Страница добавления пользователя
 app.get('/add-user', (req, res) => {
   if (!req.session.user) return res.redirect('/login');
   res.render('add-user', { error: null });
 });
 
-// Проверка пароля и добавление пользователя
-app.post('/add-user', (req, res) => {
+app.post('/add-user', async (req, res) => {
   if (!req.session.user) return res.redirect('/login');
 
   const { password, newUsername } = req.body;
@@ -478,16 +511,348 @@ app.post('/add-user', (req, res) => {
     return res.render('add-user', { error: 'Имя не может быть пустым' });
   }
 
-  db.run('INSERT INTO users (name) VALUES (?)', [newUsername.trim()], function(err) {
-    if (err) {
-      if (err.code === 'SQLITE_CONSTRAINT') {
-        return res.render('add-user', { error: 'Пользователь с таким именем уже существует' });
-      }
-      console.error(err);
-      return res.render('add-user', { error: 'Ошибка базы данных' });
-    }
+  try {
+    await pool.query('INSERT INTO users (name) VALUES ($1)', [newUsername.trim()]);
     res.redirect('/');
-  });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.render('add-user', { error: 'Пользователь с таким именем уже существует' });
+    }
+    console.error(err);
+    res.render('add-user', { error: 'Ошибка базы данных' });
+  }
+});
+
+// ===== МАРШРУТЫ ДЛЯ УЧЁТА ТИТАНОВЫХ ОСНОВАНИЙ =====
+
+// Страница со списком оснований (ИСПРАВЛЕННАЯ)
+app.get('/titan', async (req, res) => {
+  try {
+    const { order_number, status, date_from, date_to } = req.query;
+    let sql = 'SELECT * FROM titan_orders';
+    const params = [];
+    const conditions = [];
+
+    if (order_number && order_number.trim() !== '') {
+      conditions.push(`order_number ILIKE $${params.length + 1}`);
+      params.push(`%${order_number}%`);
+    }
+    if (status && status !== 'all') {
+      conditions.push(`status = $${params.length + 1}`);
+      params.push(status);
+    }
+    if (date_from) {
+      conditions.push(`order_date >= $${params.length + 1}`);
+      params.push(date_from);
+    }
+    if (date_to) {
+      conditions.push(`order_date <= $${params.length + 1}`);
+      params.push(date_to);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY order_date DESC, created_at DESC';
+
+    const result = await pool.query(sql, params);
+    const orders = result.rows;
+
+    // ИСПРАВЛЕНО: используем локальную дату
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    const todayKey = `${year}-${month}-${day}`;
+
+    const monthNames = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+    const monthNamesGen = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+    const byMonth = {};
+
+    orders.forEach(o => {
+      let dateStr = o.order_date;
+      if (!dateStr) return;
+      if (typeof dateStr === 'object' && dateStr.toISOString) {
+        const d = new Date(dateStr);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dday = String(d.getDate()).padStart(2, '0');
+        dateStr = `${y}-${m}-${dday}`;
+      } else {
+        dateStr = String(dateStr).slice(0, 10);
+      }
+      const [y, m] = dateStr.split('-').map(Number);
+      const monthKey = `${y}-${String(m).padStart(2, '0')}`;
+      if (!byMonth[monthKey]) {
+        byMonth[monthKey] = { monthKey, monthLabel: `${monthNames[m-1]} ${y}`, days: {} };
+      }
+      if (!byMonth[monthKey].days[dateStr]) {
+        byMonth[monthKey].days[dateStr] = { dateKey: dateStr, isToday: dateStr === todayKey, orders: [] };
+      }
+      byMonth[monthKey].days[dateStr].orders.push(o);
+    });
+
+    const groupedOrders = Object.keys(byMonth)
+      .sort((a, b) => b.localeCompare(a))
+      .map(k => {
+        const month = byMonth[k];
+        const dayKeys = Object.keys(month.days).sort((a, b) => b.localeCompare(a));
+        month.daysList = dayKeys.map(dk => {
+          const day = month.days[dk];
+          const [, mm, dd] = dk.split('-');
+          const mi = parseInt(mm, 10) - 1;
+          day.dayLabel = `${parseInt(dd, 10)} ${monthNamesGen[mi]} ${month.monthLabel.split(' ')[1]}`;
+          return day;
+        });
+        return month;
+      });
+
+    const isElena = (req.session.user === 'Елена');
+
+    res.render('titan', {
+      orders: orders,
+      groupedOrders: groupedOrders,
+      todayKey: todayKey, // передаём исправленную дату
+      currentUser: req.session.user,
+      isElena: isElena,
+      filters: { order_number, status, date_from, date_to }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка базы данных');
+  }
+});
+
+// Добавление записей (несколько позиций)
+app.post('/titan/add', async (req, res) => {
+  if (!req.session.user) return res.redirect('/login');
+
+  const { order_date, order_number, items } = req.body;
+  let itemsArray = [];
+  if (items) {
+    if (Array.isArray(items)) {
+      itemsArray = items;
+    } else {
+      itemsArray = [items];
+    }
+  } else {
+    const { system_name, size, has_hex } = req.body;
+    if (system_name && size) {
+      itemsArray.push({ system_name, size, has_hex: has_hex === 'on' });
+    }
+  }
+
+  if (itemsArray.length === 0) {
+    return res.status(400).send('Нет данных для добавления');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const item of itemsArray) {
+      const sizeValue = parseFloat(item.size);
+      if (isNaN(sizeValue)) {
+        throw new Error(`Некорректное значение размера: ${item.size}`);
+      }
+      await client.query(
+        `INSERT INTO titan_orders 
+         (order_date, order_number, system_name, size, has_hex, created_by) 
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          order_date || new Date().toISOString().slice(0,10),
+          order_number,
+          item.system_name,
+          sizeValue,
+          item.has_hex === true || item.has_hex === 'on',
+          req.session.user
+        ]
+      );
+    }
+    await client.query('COMMIT');
+    res.redirect('/titan');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Ошибка при добавлении:', err);
+    res.status(500).send('Ошибка при добавлении: ' + err.message);
+  } finally {
+    client.release();
+  }
+});
+
+// Переключение статуса (только Елена)
+app.post('/titan/toggle-status/:id', async (req, res) => {
+  if (req.session.user !== 'Елена') {
+    return res.status(403).json({ success: false, message: 'Доступ запрещён' });
+  }
+  const id = req.params.id;
+  try {
+    const current = await pool.query('SELECT status FROM titan_orders WHERE id = $1', [id]);
+    if (current.rows.length === 0) return res.status(404).json({ success: false });
+    const newStatus = current.rows[0].status === 'pending' ? 'issued' : 'pending';
+    await pool.query('UPDATE titan_orders SET status = $1 WHERE id = $2', [newStatus, id]);
+    res.json({ success: true, newStatus });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false });
+  }
+});
+
+// Экспорт в Excel (с учётом текущих фильтров)
+app.get('/titan/export', async (req, res) => {
+  try {
+    const { order_number, status, date_from, date_to } = req.query;
+    let sql = 'SELECT * FROM titan_orders';
+    const params = [];
+    const conditions = [];
+
+    if (order_number && order_number.trim() !== '') {
+      conditions.push(`order_number ILIKE $${params.length + 1}`);
+      params.push(`%${order_number}%`);
+    }
+    if (status && status !== 'all') {
+      conditions.push(`status = $${params.length + 1}`);
+      params.push(status);
+    }
+    if (date_from) {
+      conditions.push(`order_date >= $${params.length + 1}`);
+      params.push(date_from);
+    }
+    if (date_to) {
+      conditions.push(`order_date <= $${params.length + 1}`);
+      params.push(date_to);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY order_date, order_number';
+
+    const result = await pool.query(sql, params);
+    const rows = result.rows;
+
+    const groups = {};
+    rows.forEach(row => {
+      let dateStr = row.order_date;
+      if (typeof dateStr === 'object' && dateStr.toISOString) {
+        const d = new Date(dateStr);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dday = String(d.getDate()).padStart(2, '0');
+        dateStr = `${y}-${m}-${dday}`;
+      } else {
+        dateStr = String(dateStr).slice(0, 10);
+      }
+      const key = `${row.order_number}_${row.system_name}_${row.size}_${row.has_hex}`;
+      if (!groups[key]) {
+        groups[key] = {
+          order_date: dateStr,
+          order_number: row.order_number,
+          system_name: row.system_name,
+          size: row.size,
+          has_hex: row.has_hex ? 'Да' : 'Нет',
+          count: 0
+        };
+      }
+      groups[key].count++;
+    });
+
+    const data = Object.values(groups).sort((a, b) => {
+      if (a.order_number !== b.order_number) return a.order_number.localeCompare(b.order_number);
+      return a.order_date.localeCompare(b.order_date);
+    });
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Титановые основания');
+
+    worksheet.columns = [
+      { header: 'Дата', key: 'order_date', width: 12 },
+      { header: 'Наряд', key: 'order_number', width: 15 },
+      { header: 'Система', key: 'system_name', width: 25 },
+      { header: 'Размер', key: 'size', width: 10 },
+      { header: 'Позиционер', key: 'has_hex', width: 12 },
+      { header: 'Количество', key: 'count', width: 10 }
+    ];
+
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FF4CAF50' }
+    };
+
+    worksheet.addRows(data);
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename=titan_export.xlsx');
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('Ошибка при создании Excel:', err);
+    res.status(500).send('Ошибка при создании Excel: ' + err.message);
+  }
+});
+
+// Печать (поддерживает фильтр по номеру наряда и диапазону дат)
+app.get('/titan/print', async (req, res) => {
+  try {
+    const { order_number, date_from, date_to } = req.query;
+    let sql = 'SELECT * FROM titan_orders';
+    const params = [];
+    const conditions = [];
+
+    if (order_number) {
+      conditions.push(`order_number ILIKE $${params.length + 1}`);
+      params.push(`%${order_number}%`);
+    }
+    if (date_from) {
+      conditions.push(`order_date >= $${params.length + 1}`);
+      params.push(date_from);
+    }
+    if (date_to) {
+      conditions.push(`order_date <= $${params.length + 1}`);
+      params.push(date_to);
+    }
+
+    if (conditions.length > 0) {
+      sql += ' WHERE ' + conditions.join(' AND ');
+    }
+    sql += ' ORDER BY order_date, order_number';
+
+    const result = await pool.query(sql, params);
+    const orders = result.rows;
+    orders.forEach(o => {
+      if (o.order_date && typeof o.order_date === 'object') {
+        const d = new Date(o.order_date);
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const dday = String(d.getDate()).padStart(2, '0');
+        o.order_date = `${y}-${m}-${dday}`;
+      }
+    });
+
+    let title = 'Печать нарядов';
+    if (order_number) {
+      title = `Наряд № ${order_number}`;
+    } else if (date_from && date_to) {
+      title = `Период с ${date_from} по ${date_to}`;
+    } else if (date_from) {
+      title = `С ${date_from}`;
+    } else if (date_to) {
+      title = `По ${date_to}`;
+    }
+
+    res.render('titan_print', { 
+      orders, 
+      title: 'Печать нарядов',
+      subtitle: title,
+      order_number: order_number || null,
+      date_from: date_from || null,
+      date_to: date_to || null
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Ошибка при загрузке данных для печати');
+  }
 });
 
 // Запуск сервера
